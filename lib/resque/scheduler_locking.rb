@@ -80,7 +80,7 @@ module Resque
     end
 
     def master_lock_key
-      ENV['MASTER_LOCK_KEY'] || :resque_scheduler_master_lock
+      "#{ENV['RESQUE_SCHEDULER_MASTER_LOCK_PREFIX'] || ''}resque_scheduler_master_lock".to_sym
     end
 
     def redis_master_version

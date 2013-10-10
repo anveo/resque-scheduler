@@ -1,12 +1,11 @@
 require 'rufus/scheduler'
-require 'thwait'
 require 'resque/scheduler_locking'
+require 'resque_scheduler/logger_builder'
 
 module Resque
 
   class Scheduler
 
-    extend Resque::Helpers
     extend Resque::SchedulerLocking
 
     class << self
@@ -16,6 +15,9 @@ module Resque
 
       # If set, produces no output
       attr_accessor :mute
+
+      # If set, will write messages to the file
+      attr_accessor :logfile
 
       # If set, will try to update the schedule in the loop
       attr_accessor :dynamic
@@ -27,6 +29,8 @@ module Resque
       # queue.  Defaults to 5
       attr_writer :poll_sleep_amount
 
+      attr_writer :logger
+
       # the Rufus::Scheduler jobs that are scheduled
       def scheduled_jobs
         @@scheduled_jobs
@@ -36,11 +40,22 @@ module Resque
         @poll_sleep_amount ||= 5 # seconds
       end
 
+      def logger
+        @logger ||= ResqueScheduler::LoggerBuilder.new(:mute => mute, :verbose => verbose, :log_dev => logfile).build
+      end
+
       # Schedule all jobs and continually look for delayed jobs (never returns)
       def run
         $0 = "resque-scheduler: Starting"
+
         # trap signals
         register_signal_handlers
+
+        # Quote from the resque/worker.
+        # Fix buffering so we can `rake resque:scheduler > scheduler.log` and
+        # get output from the child in there.
+        $stdout.sync = true
+        $stderr.sync = true
 
         # Load the schedule into rufus
         # If dynamic is set, load that schedule otherwise use normal load
@@ -65,7 +80,7 @@ module Resque
 
         # never gets here.
       end
-     
+
 
       # For all signals, set the shutdown flag and wait for current
       # poll/enqueing to finish (should be almost istant).  In the
@@ -208,7 +223,7 @@ module Resque
         args = job_config['args'] || job_config[:args]
 
         klass_name = job_config['class'] || job_config[:class]
-        klass = constantize(klass_name) rescue klass_name
+        klass = Resque.constantize(klass_name) rescue klass_name
 
         params = args.is_a?(Hash) ? [args] : Array(args)
         queue = job_config['queue'] || job_config[:queue] || Resque.queue_from_class(klass)
@@ -218,7 +233,7 @@ module Resque
           # job class can not be constantized (via a requeue call from the web perhaps), fall
           # back to enqueing normally via Resque::Job.create.
           begin
-            constantize(job_klass).scheduled(queue, klass_name, *params)
+            Resque.constantize(job_klass).scheduled(queue, klass_name, *params)
           rescue NameError
             # Note that the custom job class (job_config['custom_job_class']) is the one enqueued
             Resque::Job.create(queue, job_klass, *params)
@@ -296,22 +311,23 @@ module Resque
         true
       end
 
-      # Sets the shutdown flag, exits if sleeping
+      # Sets the shutdown flag, clean schedules and exits if sleeping
       def shutdown
         @shutdown = true
+
         if @sleeping
-          release_master_lock!
+          Resque.clean_schedules
+          Thread.new { release_master_lock! }
           exit
         end
       end
 
       def log!(msg)
-        puts "#{Time.now.strftime("%Y-%m-%d %H:%M:%S")} #{msg}" unless mute
+        logger.info msg
       end
 
       def log(msg)
-        # add "verbose" logic later
-        log!(msg) if verbose
+        logger.debug msg
       end
 
       def app_str
